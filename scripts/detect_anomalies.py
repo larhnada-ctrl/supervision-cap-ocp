@@ -1,22 +1,39 @@
-import os
 import re
+import sys
 import unicodedata
-from urllib.parse import quote_plus
+from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+
+
+# La racine du dépôt est ajoutée au chemin d'import pour que
+# "python scripts/detect_anomalies.py" trouve le paquet common.
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+
+from common.db import (  # noqa: E402  (import après ajustement de sys.path)
+    check_connection,
+    describe_target,
+    get_engine,
+)
 
 
 # ============================================================
 # 1. CONFIGURATION DE POSTGRESQL
 # ============================================================
 
-DB_USER = "postgres"
-DB_PASSWORD = os.getenv("CAP_DB_PASSWORD")
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "cap_supervision"
+# La configuration PostgreSQL provient de common/db.py,
+# qui lit DATABASE_URL.
+
+# Réglages d'insertion par lots (voir import_postgresql.py).
+CHUNK_SIZE = 5000
+MAX_BOUND_PARAMETERS = 60000
 
 # Les mesures sont enregistrées toutes les 10 minutes.
 SAMPLE_INTERVAL_MINUTES = 10
@@ -51,22 +68,22 @@ VARIABLE_TAGS = {
 
 def create_postgresql_engine() -> Engine:
     """
-    Crée la connexion à la base de données PostgreSQL.
+    Retourne le moteur PostgreSQL partagé.
+
+    Ce script effectue des lectures volumineuses puis du DDL :
+    on garde la connexion directe plutôt que le pooler.
     """
 
-    if not DB_PASSWORD:
-        raise ValueError(
-            "La variable CAP_DB_PASSWORD n'est pas définie."
-        )
+    return get_engine()
 
-    encoded_password = quote_plus(DB_PASSWORD)
 
-    database_url = (
-        f"postgresql+psycopg2://{DB_USER}:"
-        f"{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
+def compute_chunk_size(column_count: int) -> int:
+    """Borne la taille des lots sous la limite de paramètres liés."""
 
-    return create_engine(database_url)
+    if column_count <= 0:
+        return CHUNK_SIZE
+
+    return min(CHUNK_SIZE, max(1, MAX_BOUND_PARAMETERS // column_count))
 
 
 # ============================================================
@@ -1170,6 +1187,8 @@ def save_anomaly_events(
         engine,
         if_exists="replace",
         index=False,
+        chunksize=compute_chunk_size(len(columns)),
+        method="multi",
     )
 
     print(
@@ -1233,7 +1252,11 @@ def main() -> None:
         # Étape 1 : connexion PostgreSQL
         engine = create_postgresql_engine()
 
-        print("Connexion PostgreSQL réussie.")
+        check_connection(engine)
+
+        print(
+            f"Connexion PostgreSQL réussie : {describe_target()}"
+        )
 
         # Étape 2 : vérification des tables
         check_required_tables(engine)
@@ -1311,14 +1334,14 @@ def main() -> None:
 
     except Exception as error:
         print(
-            f"\nErreur pendant la détection : {error}"
+            f"\nErreur pendant la détection : {error}",
+            file=sys.stderr,
         )
+        sys.exit(1)
 
     finally:
         if engine is not None:
             engine.dispose()
-
-        print("\nConnexion PostgreSQL fermée.")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,15 @@
+import logging
 import os
-from urllib.parse import quote_plus
 
 from fastapi import FastAPI, HTTPException, Query
-from sqlalchemy import create_engine, text
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+
+from common.db import DatabaseConfigError, get_engine
+
+
+logger = logging.getLogger("cap.api")
 
 
 # =========================================================
@@ -18,34 +24,42 @@ app = FastAPI(
 
 
 # =========================================================
-# CONFIGURATION POSTGRESQL
+# CONFIGURATION CORS
 # =========================================================
+# CORS_ORIGINS accepte une liste d'origines séparées par des
+# virgules. Exemple :
+#     CORS_ORIGINS=https://cap-supervision.streamlit.app
+# La valeur par défaut "*" ouvre l'API à toutes les origines.
 
-DB_USER = "postgres"
-DB_PASSWORD = os.getenv("CAP_DB_PASSWORD")
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "cap_supervision"
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+] or ["*"]
 
-
-def create_postgresql_engine():
-
-    if not DB_PASSWORD:
-        raise RuntimeError(
-            "La variable CAP_DB_PASSWORD n'est pas définie."
-        )
-
-    password_encoded = quote_plus(DB_PASSWORD)
-
-    database_url = (
-        f"postgresql+psycopg2://{DB_USER}:"
-        f"{password_encoded}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
-
-    return create_engine(database_url)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials="*" not in CORS_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-engine = create_postgresql_engine()
+# =========================================================
+# CONNEXION POSTGRESQL
+# =========================================================
+# La configuration vient de common/db.py, qui lit DATABASE_URL.
+# Le moteur est construit au premier appel, pas à l'import : si
+# la base est injoignable au démarrage, le processus démarre
+# quand même et /health répond. Cela évite les redémarrages en
+# boucle et laisse un point d'observation exploitable.
+
+
+def engine():
+    """Retourne le moteur partagé (connexion via le pooler Neon)."""
+
+    return get_engine(prefer_pooled=True)
 
 
 # =========================================================
@@ -56,7 +70,7 @@ def execute_query(query, parameters=None):
 
     try:
 
-        with engine.connect() as connection:
+        with engine().connect() as connection:
 
             result = connection.execute(
                 text(query),
@@ -73,11 +87,24 @@ def execute_query(query, parameters=None):
             "data": rows
         }
 
-    except SQLAlchemyError as error:
+    except DatabaseConfigError as error:
+
+        logger.error("Configuration base de données invalide : %s", error)
 
         raise HTTPException(
             status_code=500,
-            detail=f"Erreur PostgreSQL : {error}"
+            detail="Configuration de la base de données invalide."
+        )
+
+    except SQLAlchemyError as error:
+
+        # Le détail technique va dans les journaux du serveur ;
+        # le client reçoit un message générique.
+        logger.exception("Erreur PostgreSQL : %s", error)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de l'accès à la base de données."
         )
 
 
@@ -94,15 +121,33 @@ def root():
 
 
 # =========================================================
-# HEALTH CHECK
+# HEALTH CHECK - LIVENESS
 # =========================================================
+# Ne touche pas à la base. Répond 200 tant que le processus est
+# vivant. C'est cette route qu'il faut donner au health check de
+# Render : elle ne provoque pas de redémarrage lorsque Neon met
+# la base en veille.
 
 @app.get("/health")
 def health():
 
+    return {
+        "status": "ok",
+        "service": "cap-supervision-api"
+    }
+
+
+# =========================================================
+# HEALTH CHECK - READINESS
+# =========================================================
+# Vérifie réellement la base avec un SELECT 1.
+
+@app.get("/health/db")
+def health_db():
+
     try:
 
-        with engine.connect() as connection:
+        with engine().connect() as connection:
 
             connection.execute(
                 text("SELECT 1")
@@ -113,11 +158,22 @@ def health():
             "database": "connectée"
         }
 
-    except SQLAlchemyError as error:
+    except DatabaseConfigError as error:
+
+        logger.error("Configuration base de données invalide : %s", error)
 
         raise HTTPException(
-            status_code=500,
-            detail=f"Erreur de connexion : {error}"
+            status_code=503,
+            detail="Configuration de la base de données invalide."
+        )
+
+    except SQLAlchemyError as error:
+
+        logger.exception("Base injoignable : %s", error)
+
+        raise HTTPException(
+            status_code=503,
+            detail="Base de données injoignable."
         )
 
 

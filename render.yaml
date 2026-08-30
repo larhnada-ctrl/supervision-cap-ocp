@@ -1,0 +1,55 @@
+# =========================================================
+# CAP Supervision - Blueprint Render (Infrastructure as Code)
+# =========================================================
+# Ce fichier decrit le service API. Render le lit a la creation
+# du Blueprint puis a chaque push sur la branche suivie.
+#
+# Mise en place :
+#   1. Render Dashboard > New > Blueprint
+#   2. Selectionner ce depot ; render.yaml est detecte
+#   3. Renseigner les variables marquees "sync: false"
+#      (elles ne sont jamais stockees dans le depot)
+#
+# La base PostgreSQL est hebergee sur Neon, hors Render : elle
+# n'apparait donc pas dans ce Blueprint. L'interface Streamlit
+# est deployee sur Streamlit Community Cloud.
+# =========================================================
+
+services:
+  - type: web
+    name: cap-supervision-api
+    runtime: python
+    plan: free
+
+    # Neon est en us-east-2 : Ohio est la region Render la plus
+    # proche, ce qui limite la latence vers la base.
+    region: ohio
+
+    branch: main
+    autoDeploy: true
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+
+    # Sonde de vivacite : /health ne touche pas a la base.
+    # /health/db existe aussi mais ne doit PAS servir ici : Neon
+    # suspend les instances inactives, et Render redemarrerait le
+    # service en boucle a chaque mise en veille.
+    healthCheckPath: /health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+      # Connexion directe Neon (repli si le pooler est absent).
+      - key: DATABASE_URL
+        sync: false
+
+      # Pooler PgBouncer Neon : utilise en priorite par l'API.
+      - key: DATABASE_URL_POOLED
+        sync: false
+
+      # Origines autorisees par CORS. Renseigner l'URL Streamlit,
+      # par exemple https://cap-supervision.streamlit.app
+      - key: CORS_ORIGINS
+        sync: false

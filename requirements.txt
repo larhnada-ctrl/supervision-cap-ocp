@@ -1,0 +1,29 @@
+# ---------------------------------------------------------
+# CAP Supervision - dependances applicatives
+# Versions epinglees : un build reproductible sur Render
+# et Streamlit Community Cloud.
+# ---------------------------------------------------------
+
+# --- API (FastAPI + serveur ASGI) ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+# --- Base de donnees ---
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+
+# --- Configuration ---
+python-dotenv==1.2.3
+
+# --- Traitement des donnees ---
+# pandas < 3 : pandas 3.0 modifie les dtypes chaines par defaut
+# et le copy-on-write, ce qui change l'inference de types de
+# to_sql. On reste sur la branche 2.x, stable pour ce pipeline.
+pandas==2.3.3
+numpy==2.2.6
+openpyxl==3.1.5
+
+# --- Interface Streamlit ---
+streamlit==1.62.0
+plotly==7.0.0
+requests==2.34.2

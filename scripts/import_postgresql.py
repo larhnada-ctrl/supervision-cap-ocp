@@ -1,28 +1,60 @@
-import os
+"""
+Importe les fichiers Excel nettoyés dans PostgreSQL.
+
+Ce script est destiné à être lancé ponctuellement, à la main,
+depuis un poste de développement ou un job unique. Il n'est pas
+appelé au démarrage de l'application : chaque table est recréée
+(if_exists="replace"), un lancement accidentel effacerait les
+données existantes.
+
+Usage :
+    python scripts/import_postgresql.py
+"""
+
+import sys
+import time
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 
 # ---------------------------------------------------------
 # Chemins du projet
 # ---------------------------------------------------------
+# La racine du dépôt est ajoutée au chemin d'import pour que
+# "python scripts/import_postgresql.py" trouve le paquet common.
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 DATA_DIR = BASE_DIR / "data" / "cleaned"
 
 
-# ---------------------------------------------------------
-# Paramètres PostgreSQL
-# ---------------------------------------------------------
+from common.db import (  # noqa: E402  (import après ajustement de sys.path)
+    check_connection,
+    describe_target,
+    get_engine,
+)
 
-DB_USER = "postgres"
-DB_PASSWORD = os.getenv("CAP_DB_PASSWORD")
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "cap_supervision"
+
+# ---------------------------------------------------------
+# Réglages d'insertion
+# ---------------------------------------------------------
+# method="multi" regroupe plusieurs lignes dans une seule
+# instruction INSERT. Sur une base distante comme Neon, cela
+# remplace des dizaines de milliers d'allers-retours réseau par
+# quelques requêtes : l'import passe de plusieurs minutes à
+# quelques secondes.
+
+CHUNK_SIZE = 5000
+
+# PostgreSQL n'accepte pas plus de 65535 paramètres liés par
+# instruction. Avec method="multi", le nombre de paramètres vaut
+# lignes x colonnes : on borne la taille des lots en conséquence.
+MAX_BOUND_PARAMETERS = 60000
 
 
 # ---------------------------------------------------------
@@ -54,24 +86,29 @@ DATE_COLUMNS = {
 
 
 # ---------------------------------------------------------
-# Création de la connexion PostgreSQL
+# Index à créer après l'import
 # ---------------------------------------------------------
+# to_sql(if_exists="replace") supprime puis recrée la table :
+# les index sont donc perdus à chaque import et doivent être
+# reconstruits ensuite, dans la même transaction.
+#
+# mesures_dcs est la seule table volumineuse interrogée avec un
+# filtre : /mesures?tag=... puis ORDER BY timestamp DESC.
+# L'index composite couvre le filtre et le tri en une seule
+# structure ; le second sert au tri sans filtre.
 
-def create_postgresql_engine():
-    if not DB_PASSWORD:
-        raise ValueError(
-            "Le mot de passe PostgreSQL n'est pas défini. "
-            "Définissez la variable CAP_DB_PASSWORD."
-        )
-
-    password_encoded = quote_plus(DB_PASSWORD)
-
-    database_url = (
-        f"postgresql+psycopg2://{DB_USER}:"
-        f"{password_encoded}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
-
-    return create_engine(database_url)
+INDEXES = {
+    "mesures_dcs": [
+        (
+            "idx_mesures_dcs_tag_timestamp",
+            'mesures_dcs (tag, "timestamp" DESC)',
+        ),
+        (
+            "idx_mesures_dcs_timestamp",
+            'mesures_dcs ("timestamp" DESC)',
+        ),
+    ],
+}
 
 
 # ---------------------------------------------------------
@@ -128,24 +165,74 @@ def convert_date_columns(
 
 
 # ---------------------------------------------------------
+# Taille de lot adaptée au nombre de colonnes
+# ---------------------------------------------------------
+
+def compute_chunk_size(column_count: int) -> int:
+
+    if column_count <= 0:
+        return CHUNK_SIZE
+
+    limit = max(1, MAX_BOUND_PARAMETERS // column_count)
+
+    return min(CHUNK_SIZE, limit)
+
+
+# ---------------------------------------------------------
+# Création des index
+# ---------------------------------------------------------
+
+def create_indexes(connection) -> None:
+
+    for table_name, definitions in INDEXES.items():
+
+        for index_name, target in definitions:
+
+            connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    f"ON {target}"
+                )
+            )
+
+        # Rafraîchit les statistiques du planificateur pour que
+        # les nouveaux index soient réellement utilisés.
+        connection.execute(
+            text(f"ANALYZE {table_name}")
+        )
+
+        print(
+            f"  {table_name:<18} "
+            f"{len(definitions):>6} index    "
+            f"statistiques mises à jour"
+        )
+
+
+# ---------------------------------------------------------
 # Programme principal
 # ---------------------------------------------------------
 
 def main() -> None:
     engine = None
+    total_rows = 0
 
     try:
-        engine = create_postgresql_engine()
+        engine = get_engine()
 
-        # Test de connexion
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+        check_connection(engine)
 
-        print("Connexion PostgreSQL réussie.")
+        print(f"Connexion PostgreSQL réussie : {describe_target()}")
+        print()
 
-        # Importation des fichiers Excel
+        # L'ensemble de l'import tient dans une seule transaction :
+        # en cas d'échec, aucune table n'est laissée à moitié
+        # remplie.
         with engine.begin() as connection:
+
             for filename, table_name in FILES_TO_TABLES.items():
+
+                started_at = time.perf_counter()
+
                 dataframe = read_cleaned_excel(filename)
 
                 dataframe = convert_date_columns(
@@ -153,9 +240,8 @@ def main() -> None:
                     dataframe,
                 )
 
-                print(
-                    f"{filename} - Colonnes détectées : "
-                    f"{list(dataframe.columns)}"
+                chunk_size = compute_chunk_size(
+                    len(dataframe.columns)
                 )
 
                 dataframe.to_sql(
@@ -163,20 +249,40 @@ def main() -> None:
                     con=connection,
                     if_exists="replace",
                     index=False,
+                    chunksize=chunk_size,
+                    method="multi",
                 )
+
+                elapsed = time.perf_counter() - started_at
+                total_rows += len(dataframe)
 
                 print(
-                    f"{table_name} : "
-                    f"{len(dataframe)} lignes importées"
+                    f"  {table_name:<18} "
+                    f"{len(dataframe):>6} lignes  "
+                    f"{len(dataframe.columns)} colonnes  "
+                    f"{elapsed:5.2f}s"
                 )
 
-        print("Importation terminée avec succès.")
+            print()
+
+            create_indexes(connection)
+
+        print()
+        print(
+            f"Importation terminée : {total_rows} lignes "
+            f"dans {len(FILES_TO_TABLES)} tables."
+        )
 
     except FileNotFoundError as error:
-        print(f"Erreur de fichier : {error}")
+        print(f"Erreur de fichier : {error}", file=sys.stderr)
+        sys.exit(1)
 
     except Exception as error:
-        print(f"Erreur pendant l'importation : {error}")
+        print(
+            f"Erreur pendant l'importation : {error}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     finally:
         if engine is not None:

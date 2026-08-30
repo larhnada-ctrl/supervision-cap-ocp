@@ -1,150 +1,60 @@
 import streamlit as st
-import requests
 import pandas as pd
 import plotly.express as px
+import requests
+import os
 
+st.set_page_config(page_title="Mesures CAP", layout="wide")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
-# ==========================
-# CONFIGURATION
-# ==========================
+st.markdown("## 📊 Suivi des mesures CAP")
 
-st.set_page_config(
-    page_title="Mesures CAP",
-    page_icon="📈",
-    layout="wide"
-)
+@st.cache_data(ttl=60)
+def load_mesures():
+    try:
+        response = requests.get(f"{API_URL}/mesures")
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return {"count": 0, "data": []}
 
-API_URL = "http://127.0.0.1:8000"
-
-
-# ==========================
-# RECUPERATION
-# ==========================
-
-@st.cache_data
-def get_mesures():
-
-    response = requests.get(
-        f"{API_URL}/mesures",
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    result = response.json()
-
-    return pd.DataFrame(
-        result["data"]
-    )
-
-
-# ==========================
-# TITRE
-# ==========================
-
-st.title("📈 Mesures de l'unité CAP")
-
-df = get_mesures()
-
-
-# ==========================
-# INFORMATIONS
-# ==========================
-
-st.metric(
-    "Nombre total de mesures",
-    len(df)
-)
-
-
-# ==========================
-# VERIFICATION
-# ==========================
+payload = load_mesures()
+df = pd.DataFrame(payload.get("data", []))
 
 if df.empty:
-
-    st.warning(
-        "Aucune mesure disponible."
-    )
-
-    st.stop()
-
-
-# ==========================
-# DATE
-# ==========================
-
-if "timestamp" in df.columns:
-
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"]
-    )
-
-
-# ==========================
-# CHOIX DES COLONNES
-# ==========================
-
-colonnes_numeriques = df.select_dtypes(
-    include=["number"]
-).columns.tolist()
-
-
-if len(colonnes_numeriques) == 0:
-
-    st.error(
-        "Aucune colonne numérique trouvée."
-    )
-
-    st.dataframe(df)
-
-    st.stop()
-
-
-parametre = st.selectbox(
-    "Choisir un paramètre",
-    colonnes_numeriques
-)
-
-
-# ==========================
-# GRAPHIQUE
-# ==========================
-
-if "timestamp" in df.columns:
-
-    fig = px.line(
-        df,
-        x="timestamp",
-        y=parametre,
-        title=f"Évolution de {parametre}"
-    )
-
+    st.info("Aucune mesure enregistrée dans la base de données.")
 else:
+    # S'assurer que le timestamp est au format datetime pour Plotly
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.sort_values(by="timestamp")
 
-    fig = px.line(
-        df,
-        y=parametre,
-        title=f"Évolution de {parametre}"
-    )
+    # Liste des paramètres uniques à tracer (basé sur la colonne 'parametre' ou 'tag')
+    parametres = df["parametre"].unique() if "parametre" in df.columns else []
 
-
-st.plotly_chart(
-    fig,
-    use_container_width=True
-)
-
-
-# ==========================
-# TABLEAU COMPLET
-# ==========================
-
-st.subheader(
-    "Toutes les mesures"
-)
-
-st.dataframe(
-    df,
-    use_container_width=True,
-    height=500
-)
+    # Affichage en grille (2 colonnes)
+    cols = st.columns(2)
+    
+    for i, param in enumerate(parametres):
+        col = cols[i % 2] # Alterne entre la colonne 1 et 2
+        df_param = df[df["parametre"] == param]
+        
+        with col:
+            st.markdown(f"##### {param}")
+            fig = px.line(
+                df_param, 
+                x="timestamp", 
+                y="valeur",
+                color_discrete_sequence=["#cc3d55"] # Rouge Grafana
+            )
+            fig.update_layout(
+                height=250,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title=None,
+                yaxis_title=None,
+                xaxis=dict(showgrid=True, gridcolor='#e5e7eb'),
+                yaxis=dict(showgrid=True, gridcolor='#e5e7eb'),
+                plot_bgcolor='white'
+            )
+            st.plotly_chart(fig, use_container_width=True)
