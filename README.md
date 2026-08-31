@@ -121,9 +121,6 @@ python scripts/import_postgresql.py
 python scripts/detect_anomalies.py
 ```
 
-> `import_postgresql.py` recrée chaque table (`if_exists="replace"`).
-> Un lancement efface les données existantes : ne jamais le brancher
-> sur le démarrage d'un service.
 
 Tables produites : `mesures_dcs`, `etats_scada`, `alarmes`,
 `arrets_cap`, `laboratoire`, `regles_simples`, `regles_croisees`,
