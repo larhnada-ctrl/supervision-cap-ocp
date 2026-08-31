@@ -143,17 +143,3 @@ puis `anomalies_detectees`.
 | GET     | `/laboratoire`     | analyses laboratoire                 |
 | GET     | `/etats-scada`     | états SCADA                          |
 
----
-
-## Déploiement
-
-**API — Render.** `render.yaml` décrit le service. Créer un
-Blueprint depuis le dépôt, puis renseigner `DATABASE_URL`,
-`DATABASE_URL_POOLED` et `CORS_ORIGINS` dans le tableau de bord
-(elles sont marquées `sync: false` et ne transitent pas par git).
-
-**Interface — Streamlit Community Cloud.** Fichier principal :
-`app/home.py`. Renseigner dans *Secrets* : `API_URL` (URL publique
-du service Render), `APP_USER_EMAIL` et `APP_USER_PASSWORD`.
-Streamlit expose les secrets de premier niveau comme variables
-d'environnement, ce que lit le code.
